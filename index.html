@@ -1,0 +1,426 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bulk Linking URL Finder</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f3f6fb;color:#172033;font:15px Arial,sans-serif}
+main{max-width:1150px;margin:28px auto;padding:20px}
+.card{background:white;border:1px solid #e1e7ef;border-radius:12px;padding:22px;margin-bottom:18px}
+h1{margin:0 0 8px;color:#173b70}
+h2{font-size:18px}
+.muted{color:#65738a;font-size:13px;line-height:1.6}
+label{display:block;font-weight:600;margin:15px 0 8px}
+textarea,input,select{width:100%;padding:11px;border:1px solid #cbd5e1;border-radius:7px;font:inherit;background:white}
+textarea{min-height:140px;resize:vertical}
+button{padding:11px 16px;border:0;border-radius:7px;background:#1769d2;color:white;font-weight:600;cursor:pointer;margin:5px 5px 5px 0}
+button:disabled{opacity:.5;cursor:not-allowed}
+.secondary{background:#e8edf5;color:#24334a}
+.danger{background:#b42318}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:15px}
+.stat{background:#f5f8fc;border-radius:8px;padding:14px}
+.stat strong{display:block;font-size:23px;margin-top:7px}
+.progress{height:10px;background:#e3eaf3;border-radius:8px;overflow:hidden;margin:12px 0}
+#bar{height:100%;width:0;background:#1874db;transition:width .2s}
+.tablewrap{overflow:auto;max-height:500px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:10px;border-bottom:1px solid #e4e9f0;text-align:left;overflow-wrap:anywhere}
+th{background:#edf3fa;position:sticky;top:0}
+a{color:#075fc5;overflow-wrap:anywhere}
+.badge{padding:4px 7px;border-radius:5px;background:#edf3fa}
+#message{white-space:pre-wrap;line-height:1.6}
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>Bulk Linking URL Finder</h1>
+    <p class="muted">Discover URLs from public sitemaps and crawlable pages. Enter up to 50 domains.</p>
+
+    <label for="domains">Domains — one per line</label>
+    <textarea id="domains" placeholder="example.com&#10;example.org&#10;example.net"></textarea>
+
+    <div class="grid">
+      <div>
+        <label for="limit">Maximum pages per domain</label>
+        <select id="limit">
+          <option value="100">100 pages</option>
+          <option value="500" selected>500 pages</option>
+          <option value="1000">1,000 pages</option>
+          <option value="5000">5,000 pages</option>
+          <option value="custom">Custom limit</option>
+        </select>
+      </div>
+      <div>
+        <label for="customLimit">Custom page limit</label>
+        <input id="customLimit" type="number" min="1" max="10000" value="2000">
+        <p class="muted">Used only when Custom limit is selected.</p>
+      </div>
+    </div>
+
+    <p class="muted">Page limits are maximum attempts per domain. Results depend on sitemap availability, site access and browser security restrictions.</p>
+
+    <button id="start">Start Scan</button>
+    <button id="stop" class="danger" disabled>Stop Scan</button>
+    <button id="export" class="secondary">Export CSV</button>
+    <button id="clear" class="secondary">Clear Results</button>
+  </div>
+
+  <div class="card">
+    <h2>Scan Progress</h2>
+    <div class="grid">
+      <div class="stat">Domains processed<strong id="domainProgress">0 / 0</strong></div>
+      <div class="stat">Pages attempted<strong id="pages">0</strong></div>
+      <div class="stat">Unique URLs found<strong id="found">0</strong></div>
+      <div class="stat">Errors / blocked<strong id="errors">0</strong></div>
+    </div>
+    <div class="progress"><div id="bar"></div></div>
+    <div id="message" class="muted">Ready to scan.</div>
+  </div>
+
+  <div class="card">
+    <h2>Domain Status</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Domain</th><th>Status</th><th>Pages attempted</th><th>URLs found</th></tr></thead>
+        <tbody id="domainRows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Discovered URLs</h2>
+    <p class="muted">URLs found in accessible sitemaps and fetched page HTML. The source page is shown where available.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Target domain</th><th>Discovered URL</th><th>Source page</th><th>Type</th></tr></thead>
+        <tbody id="urlRows"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let results = [];
+let running = false;
+let stopRequested = false;
+let totalPages = 0;
+let errorCount = 0;
+let domainsDone = 0;
+let totalDomains = 0;
+let domainStats = [];
+let seenURLs = new Set();
+
+function normalizeDomain(value) {
+  try {
+    let u = new URL(/^https?:\/\//i.test(value) ? value : "https://" + value);
+    if (!["http:", "https:"].includes(u.protocol)) return null;
+    if (!u.hostname.includes(".") || u.hostname.includes(" ")) return null;
+    return {host:u.hostname.toLowerCase(), origin:u.origin};
+  } catch { return null; }
+}
+
+function addResult(domain, url, source, type) {
+  try {
+    const u = new URL(url);
+    if (!["http:", "https:"].includes(u.protocol)) return;
+    u.hash = "";
+    const clean = u.href;
+    if (seenURLs.has(clean)) return;
+    seenURLs.add(clean);
+    results.push({domain, url:clean, source:source || "", type});
+    const tr = document.createElement("tr");
+    [domain, clean, source || "—", type].forEach((v, i) => {
+      const td = document.createElement("td");
+      if (i === 1 || (i === 2 && source)) {
+        const a = document.createElement("a");
+        a.href = v;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.textContent = v;
+        td.appendChild(a);
+      } else td.textContent = v;
+      tr.appendChild(td);
+    });
+    $("urlRows").appendChild(tr);
+    $("found").textContent = results.length;
+  } catch {}
+}
+
+function setDomainRow(stat) {
+  let tr = stat.row;
+  if (!tr) {
+    tr = document.createElement("tr");
+    stat.row = tr;
+    stat.cells = [];
+    for (let i=0;i<4;i++) {
+      const td=document.createElement("td");
+      tr.appendChild(td);
+      stat.cells.push(td);
+    }
+    $("domainRows").appendChild(tr);
+  }
+  stat.cells[0].textContent = stat.domain;
+  stat.cells[1].textContent = stat.status;
+  stat.cells[2].textContent = stat.pages;
+  stat.cells[3].textContent = stat.found;
+}
+
+function updateProgress() {
+  $("domainProgress").textContent = domainsDone + " / " + totalDomains;
+  $("pages").textContent = totalPages;
+  $("errors").textContent = errorCount;
+  $("bar").style.width = (totalDomains ? domainsDone / totalDomains * 100 : 0) + "%";
+}
+
+function getLimit() {
+  if ($("limit").value === "custom") {
+    const n = Number($("customLimit").value);
+    if (!Number.isInteger(n) || n < 1 || n > 10000)
+      throw new Error("Custom limit 1 se 10000 ke beech integer hona chahiye.");
+    return n;
+  }
+  return Number($("limit").value);
+}
+
+async function fetchText(url) {
+  // Browser-based cross-origin requests can be blocked by the destination server.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const response = await fetch(url, {
+      signal:controller.signal,
+      redirect:"follow",
+      headers:{"Accept":"text/html,application/xml,text/xml,*/*"}
+    });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    return await response.text();
+  } finally { clearTimeout(timeout); }
+}
+
+function parseLocations(xml) {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  if (doc.querySelector("parsererror")) return [];
+  return [...doc.querySelectorAll("loc")]
+    .map(el => el.textContent.trim())
+    .filter(Boolean);
+}
+
+async function scanDomain(stat, limit) {
+  const {host, origin} = stat.normalized;
+  const queue = [];
+  const queued = new Set();
+  const pageURLs = new Set();
+
+  function enqueue(url) {
+    try {
+      const u = new URL(url, origin);
+      if (!["http:", "https:"].includes(u.protocol)) return;
+      if (u.hostname.toLowerCase() !== host) return;
+      u.hash = "";
+      if (queued.has(u.href) || queued.size >= limit) return;
+      queued.add(u.href);
+      queue.push(u.href);
+    } catch {}
+  }
+
+  enqueue(origin + "/");
+
+  // Read robots.txt to locate declared sitemaps.
+  try {
+    const robots = await fetchText(origin + "/robots.txt");
+    const maps = robots.match(/^sitemap:\s*(\S+)/gim) || [];
+    maps.forEach(line => enqueue(line.replace(/^sitemap:\s*/i, "")));
+    stat.status = "Robots.txt accessible";
+  } catch {
+    stat.status = "Trying common sitemaps";
+  }
+
+  [
+    origin + "/sitemap.xml",
+    origin + "/sitemap_index.xml",
+    origin + "/wp-sitemap.xml"
+  ].forEach(enqueue);
+
+  const processedSitemaps = new Set();
+  let sitemapCount = 0;
+  let attempts = 0;
+  let domainFoundBefore = results.length;
+
+  // Inspect sitemap files first, then attempt page crawling.
+  while (queue.length && attempts < limit && !stopRequested) {
+    const url = queue.shift();
+    const isSitemap = /sitemap[^/]*\.xml(?:\.gz)?(?:\?.*)?$/i.test(url) ||
+                      /\/wp-sitemap\.xml$/i.test(url);
+
+    if (isSitemap && !processedSitemaps.has(url) && sitemapCount < 20) {
+      processedSitemaps.add(url);
+      sitemapCount++;
+      try {
+        const text = await fetchText(url);
+        const locs = parseLocations(text);
+        if (locs.length) {
+          for (const loc of locs) {
+            if (/<sitemapindex[\s>]/i.test(text) ||
+                /sitemap[^/]*\.xml(?:\.gz)?$/i.test(loc)) {
+              if (!processedSitemaps.has(loc)) enqueue(loc);
+            } else {
+              enqueue(loc);
+            }
+          }
+        }
+      } catch {
+        errorCount++;
+        $("errors").textContent = errorCount;
+      }
+      continue;
+    }
+
+    if (pageURLs.has(url)) continue;
+    pageURLs.add(url);
+    attempts++;
+    totalPages++;
+    stat.pages = attempts;
+    updateProgress();
+    setDomainRow(stat);
+    $("message").textContent = "Scanning " + host + "\nPage attempt " + attempts + " / " + limit;
+
+    try {
+      const html = await fetchText(url);
+      addResult(host, url, url, "Page");
+
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const canonical = doc.querySelector('link[rel="canonical"]');
+      if (canonical) enqueue(new URL(canonical.href, url).href);
+
+      // Discover same-domain pages to continue the crawl.
+      doc.querySelectorAll("a[href]").forEach(a => {
+        try {
+          const foundURL = new URL(a.getAttribute("href"), url);
+          if (foundURL.hostname.toLowerCase() === host) enqueue(foundURL.href);
+          // External links are recorded as outbound URLs found on this page.
+          else if (["http:", "https:"].includes(foundURL.protocol))
+            addResult(host, foundURL.href, url, "External link");
+        } catch {}
+      });
+
+      // Extract URLs explicitly included in the HTML source.
+      const canonicalUrl = canonical ? new URL(canonical.href, url).href : url;
+      addResult(host, canonicalUrl, url, "Canonical");
+      stat.status = "Scanning";
+    } catch (e) {
+      errorCount++;
+      stat.status = "Blocked / inaccessible";
+      $("errors").textContent = errorCount;
+    }
+    stat.found = results.length - domainFoundBefore;
+    setDomainRow(stat);
+  }
+
+  stat.found = results.length - domainFoundBefore;
+  if (stopRequested) stat.status = "Stopped";
+  else if (attempts >= limit) stat.status = "Page limit reached";
+  else if (attempts === 0) stat.status = "No pages accessible";
+  else if (stat.status === "Scanning" || stat.status === "Trying common sitemaps")
+    stat.status = "Completed";
+  stat.pages = attempts;
+  setDomainRow(stat);
+}
+
+$("start").addEventListener("click", async () => {
+  if (running) return;
+  const lines = $("domains").value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+  const unique = [...new Set(lines)];
+  if (!unique.length) return alert("Pehle domains enter karo.");
+  if (unique.length > 50) return alert("Ek scan mein maximum 50 domains allowed hain.");
+
+  let limit;
+  try { limit = getLimit(); } catch(e) { return alert(e.message); }
+
+  const normalized = unique.map(normalizeDomain);
+  if (normalized.some(x=>!x)) return alert("Invalid domain mila. Har line mein valid domain enter karo.");
+
+  running = true;
+  stopRequested = false;
+  $("start").disabled = true;
+  $("stop").disabled = false;
+  totalDomains = unique.length;
+  domainsDone = 0;
+  totalPages = 0;
+  errorCount = 0;
+  domainStats = unique.map((domain,i)=>({
+    domain:normalized[i].host,
+    normalized:normalized[i],
+    status:"Queued",pages:0,found:0,row:null
+  }));
+  $("domainRows").innerHTML = "";
+  $("urlRows").innerHTML = "";
+  results = [];
+  seenURLs = new Set();
+  $("found").textContent = "0";
+  updateProgress();
+  domainStats.forEach(setDomainRow);
+
+  try {
+    for (const stat of domainStats) {
+      if (stopRequested) break;
+      stat.status = "Starting";
+      setDomainRow(stat);
+      await scanDomain(stat, limit);
+      domainsDone++;
+      updateProgress();
+    }
+  } finally {
+    running = false;
+    $("start").disabled = false;
+    $("stop").disabled = true;
+    $("message").textContent = stopRequested
+      ? "Scan stopped. Partial results are available for export."
+      : "Scan finished. Check domain statuses for blocked sites and limits.";
+    $("bar").style.width = (totalDomains ? domainsDone / totalDomains * 100 : 0) + "%";
+  }
+});
+
+$("stop").addEventListener("click", () => {
+  stopRequested = true;
+  $("message").textContent = "Stopping after the current request...";
+});
+
+$("clear").addEventListener("click", () => {
+  if (running) return alert("Pehle scan stop karo.");
+  results=[];
+  seenURLs.clear();
+  domainStats=[];
+  $("domainRows").innerHTML="";
+  $("urlRows").innerHTML="";
+  $("domains").value="";
+  $("found").textContent="0";
+  $("pages").textContent="0";
+  $("errors").textContent="0";
+  $("domainProgress").textContent="0 / 0";
+  $("bar").style.width="0";
+  $("message").textContent="Results cleared.";
+});
+
+$("export").addEventListener("click", () => {
+  if (!results.length) return alert("Export karne ke liye pehle results collect karo.");
+  const data = [
+    ["Target domain","Discovered URL","Source page","Type"],
+    ...results.map(r=>[r.domain,r.url,r.source,r.type])
+  ];
+  const csv = data.map(row=>row.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(",")).join("\r\n");
+  const blob = new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href=url;
+  a.download="bulk-linking-url-results.csv";
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+});
+</script>
+</body>
+</html>
